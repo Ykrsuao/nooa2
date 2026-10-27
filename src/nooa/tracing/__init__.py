@@ -209,6 +209,14 @@ def probe_otlp_endpoint(endpoint: str, timeout: float | None = None) -> bool:
     return _probe(endpoint, timeout) == "up"
 
 
+#: The dev viewer (``nooa start-dev``). IPv4, not ``localhost``: the viewer binds
+#: 0.0.0.0, so the ``::1`` that ``localhost`` resolves to first can never answer,
+#: and Windows takes about 2 s to report each refused loopback address.
+_DEFAULT_OTLP_ENDPOINT = "http://127.0.0.1:5001/v1/traces"
+#: A running local viewer answers in milliseconds; this only bounds the wait for
+#: one that is not running (measured: 4.06 s on Windows with the old defaults).
+_DEFAULT_PROBE_TIMEOUT_S = 0.5
+
 _HTTPS_ONLY_REPLIES = (
     "client sent an http request to an https server",  # Go net/http
     "the plain http request was sent to https port",  # nginx
@@ -298,7 +306,7 @@ def enable_tracing(
 
     When called with no *exporters* argument the default behaviour is:
 
-    1. Probe the local OTLP endpoint (``localhost:5001``).
+    1. Probe the local OTLP endpoint (``127.0.0.1:5001``).
     2. If reachable → send spans via OTLP HTTP to the viewer.
     3. If unreachable → print a warning and disable tracing entirely.
 
@@ -500,9 +508,16 @@ def _default_exporters() -> list[SpanExporter] | None:
     global _probe_failed
 
     explicit_endpoint = os.getenv("OTLP_ENDPOINT")
-    endpoint = explicit_endpoint or "http://localhost:5001/v1/traces"
+    endpoint = explicit_endpoint or _DEFAULT_OTLP_ENDPOINT
+    # The default endpoint is the local viewer, which answers in milliseconds or
+    # is not running at all; every first agent of a process pays this probe. An
+    # explicit endpoint may be remote and keeps the normal timeout, and an
+    # explicit OTLP_PROBE_TIMEOUT wins either way.
+    timeout = (
+        None if explicit_endpoint or os.getenv("OTLP_PROBE_TIMEOUT") else _DEFAULT_PROBE_TIMEOUT_S
+    )
 
-    resolved = resolve_otlp_endpoint(endpoint)
+    resolved = resolve_otlp_endpoint(endpoint, timeout)
     if resolved is not None:
         return [exporters_mod.journal(endpoint=resolved)]
 

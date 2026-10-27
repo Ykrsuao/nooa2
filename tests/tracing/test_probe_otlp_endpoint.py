@@ -192,3 +192,41 @@ class TestHttpsOnlyDetectionIsNarrow:
         with patch("urllib.request.urlopen", side_effect=refused):
             assert resolve_otlp_endpoint("http://localhost:5001/v1/traces") is None
         assert len(calls) == 1
+
+
+class TestDefaultEndpointProbe:
+    """Every first agent of a process probes; the default must not stall it."""
+
+    def _probed_with(self, monkeypatch, **env):
+        import nooa.tracing as tracing
+
+        for name in ("OTLP_ENDPOINT", "OTLP_PROBE_TIMEOUT"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        seen: dict[str, object] = {}
+
+        def fake_resolve(endpoint, timeout=None):
+            seen.update(endpoint=endpoint, timeout=timeout)
+            return None
+
+        monkeypatch.setattr(tracing, "resolve_otlp_endpoint", fake_resolve)
+        assert tracing._default_exporters() is None
+        return seen
+
+    def test_the_local_viewer_is_probed_over_ipv4_with_a_short_timeout(self, monkeypatch):
+        """The viewer binds 0.0.0.0, so ``localhost``'s ::1 can never answer."""
+        import nooa.tracing as tracing
+
+        seen = self._probed_with(monkeypatch)
+        assert seen["endpoint"] == "http://127.0.0.1:5001/v1/traces"
+        assert seen["timeout"] == tracing._DEFAULT_PROBE_TIMEOUT_S
+
+    def test_an_explicit_endpoint_keeps_the_normal_timeout(self, monkeypatch):
+        """It may be remote; a short timeout would disable tracing there."""
+        seen = self._probed_with(monkeypatch, OTLP_ENDPOINT="https://traces.example/v1/traces")
+        assert seen == {"endpoint": "https://traces.example/v1/traces", "timeout": None}
+
+    def test_an_explicit_probe_timeout_wins(self, monkeypatch):
+        seen = self._probed_with(monkeypatch, OTLP_PROBE_TIMEOUT="3")
+        assert seen["timeout"] is None  # _probe reads OTLP_PROBE_TIMEOUT itself
