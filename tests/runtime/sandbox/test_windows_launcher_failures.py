@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 """Failure paths of the AppContainer launcher, with the Win32 calls faked.
 
 The real-container tests in ``test_windows_appcontainer.py`` only reach these
