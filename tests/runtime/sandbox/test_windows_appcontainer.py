@@ -877,6 +877,33 @@ def test_teardown_revokes_container_grants(tmp_path):
     assert sid_text not in win_api.read_dacl(str(workspace)), "the container ACE survived teardown"
 
 
+def test_a_deferred_release_kills_now_and_still_revokes(tmp_path):
+    """CodeAct returns before the revoke; the revoke must still happen.
+
+    The worker must be dead when ``aclose`` returns — only the DACL rewrite is
+    allowed to trail the result — and draining must leave no container ACE.
+    """
+    from nooa.runtime.sandbox import win_api
+    from nooa.runtime.sandbox.executor import drain_pending_releases
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    session = _Session(workspace)
+    assert session.run("1").error is None
+    proc = session.executor._proc
+    sid_text = win_api.sid_string(win_api.container_sid(proc.container_name))
+    assert sid_text in win_api.read_dacl(str(workspace))
+
+    async def close_then_drain() -> bool:
+        await session.executor.aclose(defer_release=True)
+        alive_when_closed = proc.is_alive()
+        await drain_pending_releases()
+        return alive_when_closed
+
+    assert asyncio.run(close_then_drain()) is False, "the worker outlived aclose"
+    assert sid_text not in win_api.read_dacl(str(workspace)), "the deferred revoke never ran"
+
+
 def test_teardown_revokes_after_the_profile_is_gone(tmp_path):
     """Deleting the profile must not strand the grants it wrote.
 

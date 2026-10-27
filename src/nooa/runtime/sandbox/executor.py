@@ -87,6 +87,24 @@ def _release_worker(proc: Any) -> None:
             logger.debug("container worker release failed", exc_info=True)
 
 
+# Container releases still revoking after their executor was closed. Held here
+# because the loop keeps only weak references to tasks, and a revoke abandoned
+# halfway is exactly the stray ACE recovery exists for.
+_PENDING_RELEASES: set[asyncio.Task[None]] = set()
+
+
+async def drain_pending_releases() -> None:
+    """Wait for container grants that are still being revoked in the background.
+
+    ``aclose(defer_release=True)`` returns once the worker's job is dead; the
+    revoke continues on a thread. Hosts call this before exiting so it finishes.
+    ``asyncio.run`` would also wait for those threads at shutdown, but only for
+    a bounded time and without saying why the exit is slow.
+    """
+    while _PENDING_RELEASES:
+        await asyncio.gather(*list(_PENDING_RELEASES), return_exceptions=True)
+
+
 def _capabilities(runtime_root: str | None = None) -> Capabilities:
     if runtime_root not in _CAPS_CACHE:
         _CAPS_CACHE[runtime_root] = probe_capabilities(runtime_root)
@@ -373,7 +391,7 @@ class SandboxedExecutor:
             proc.join(timeout=1.0)
         _release_worker(proc)
 
-    async def _aterminate_worker(self) -> None:
+    async def _aterminate_worker(self, *, defer_release: bool = False) -> None:
         """Async teardown: send signals inline (fast, non-blocking) but run the
         blocking ``proc.join`` off the event loop so a worker kill/restart does
         not stall the loop (and other concurrent sessions) for up to ~2s."""
@@ -386,10 +404,20 @@ class SandboxedExecutor:
         if proc.is_alive():
             proc.kill()
             await asyncio.to_thread(proc.join, 1.0)
-        # Revoking container ACLs is a few Win32 calls per path; keep it off the
-        # loop for the same reason as the join.
+        # Revoking container ACLs rewrites the DACL of every file under each
+        # grant — tens of seconds for a large workspace — so it runs off the loop.
         if _is_container_proc(proc):
-            await asyncio.to_thread(_release_worker, proc)
+            if not defer_release:
+                await asyncio.to_thread(_release_worker, proc)
+                return
+            # Kill the whole job now, so nothing the cell started outlives this
+            # call; only the revoke continues after the caller moves on. The
+            # journal stays locked by this process until it is done, so startup
+            # recovery in another session cannot race it.
+            proc.kill()
+            task = asyncio.create_task(asyncio.to_thread(_release_worker, proc))
+            _PENDING_RELEASES.add(task)
+            task.add_done_callback(_PENDING_RELEASES.discard)
 
     async def _spawn_worker(self) -> None:
         """Start the worker without blocking the loop when that is safe.
@@ -807,7 +835,13 @@ class SandboxedExecutor:
         return _ReturnResultSignal(result=payload)
 
     # --- teardown ----------------------------------------------------------
-    async def aclose(self) -> None:
+    async def aclose(self, *, defer_release: bool = False) -> None:
+        """Stop the worker and release what it held.
+
+        With ``defer_release``, return as soon as the worker's job is dead and
+        leave the container's revoke to run in the background; see
+        :func:`drain_pending_releases`. Without it, return after the revoke.
+        """
         if self._closed:
             return
         self._closed = True
@@ -819,7 +853,7 @@ class SandboxedExecutor:
                     await asyncio.to_thread(self._proc.join, 0.5)
                 except Exception:
                     pass
-            await self._aterminate_worker()
+            await self._aterminate_worker(defer_release=defer_release)
 
     def close_sync(self) -> None:
         """Best-effort synchronous teardown (for non-async cleanup paths)."""

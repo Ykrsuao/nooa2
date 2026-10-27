@@ -97,6 +97,13 @@ startup reclaims only journals whose owning process has exited. Set
 shared by two live sessions is an error, not a default. The profile is removed
 at teardown.
 
+When a CodeAct call ends, its worker and everything the worker started are
+killed before the result is returned; revoking the grants, which rewrites the
+DACL of every file under each granted path, finishes in the background. Hosts
+call `drain_pending_releases()` (from `nooa.runtime.sandbox.executor`) before
+exiting so the revoke completes — the ACP server does — and a process killed
+first leaves the journal for the next start to reclaim.
+
 Five behaviours differ from Linux and are worth knowing:
 
 - **System directories stay readable.** Windows grants `ALL APPLICATION

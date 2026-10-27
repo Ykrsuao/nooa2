@@ -857,7 +857,11 @@ Standard Python builtins and agent instance (`self`) are available."""
             return
         session.sandbox_executor = None
         try:
-            await executor.aclose()
+            # The worker and its job die before this returns; on Windows the
+            # revoke of the container's grants (tens of seconds on a large
+            # workspace) finishes in the background instead of holding the
+            # result back. Hosts wait for it with drain_pending_releases().
+            await executor.aclose(defer_release=True)
         except Exception as exc:  # noqa: BLE001 - teardown must not mask the result
             logger.debug(f"[CODEACT] sandbox teardown error (ignored): {exc}")
 

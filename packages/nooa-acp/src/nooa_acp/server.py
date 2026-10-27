@@ -771,6 +771,13 @@ class CodingACPAdapter:
 
     async def close(self) -> None:
         await self._sessions.close()
+        if self._sandbox is not None:
+            from nooa.runtime.sandbox.executor import drain_pending_releases
+
+            # Each turn's container grants are revoked after its reply went out;
+            # finish those before the process exits rather than leave them for
+            # the next start's recovery.
+            await drain_pending_releases()
 
 
 async def serve(

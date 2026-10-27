@@ -174,3 +174,53 @@ async def test_cancelled_cold_start_still_hands_its_worker_to_aclose(monkeypatch
         await cell
     await ex.aclose()
     assert proc.released and not proc.is_alive()
+
+
+class _SlowReleaseProc(_StartedProc):
+    """A container worker whose revoke takes a while, as a large workspace does."""
+
+    RELEASE_S = 0.5
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.job_killed = False
+
+    def kill(self) -> None:
+        self.job_killed = True
+        self._alive = False
+
+    def release(self) -> None:
+        time.sleep(self.RELEASE_S)
+        self.released = True
+
+
+def _executor_holding(proc) -> SandboxedExecutor:
+    ex = SandboxedExecutor(
+        _Agent(), SandboxConfig(require=False, start_method=_START_METHOD), cell_timeout=10.0
+    )
+    ex._proc, ex._conn = proc, None  # type: ignore[assignment]
+    return ex
+
+
+@pytest.mark.asyncio
+async def test_deferred_release_kills_the_job_now_and_revokes_after():
+    """The result must not wait for the revoke, but nothing may outlive the call."""
+    from nooa.runtime.sandbox.executor import drain_pending_releases
+
+    proc = _SlowReleaseProc()
+    t0 = time.monotonic()
+    await _executor_holding(proc).aclose(defer_release=True)
+    assert time.monotonic() - t0 < _SlowReleaseProc.RELEASE_S / 2
+    assert proc.job_killed, "the cell's job must die before aclose returns"
+    assert not proc.released
+
+    await drain_pending_releases()
+    assert proc.released
+
+
+@pytest.mark.asyncio
+async def test_plain_aclose_still_returns_after_the_revoke():
+    """Callers that check the ACL right after close keep that guarantee."""
+    proc = _SlowReleaseProc()
+    await _executor_holding(proc).aclose()
+    assert proc.released
