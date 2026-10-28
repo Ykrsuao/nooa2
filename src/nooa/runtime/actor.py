@@ -2981,6 +2981,11 @@ class ActorRuntime:
                     return_annotation = hints.get("return", inspect.Signature.empty)
                 except (NameError, TypeError, AttributeError):
                     return_annotation = sig.return_annotation
+                    # get_type_hints maps `-> None` to NoneType; the raw fallback gives
+                    # None (or "None" under PEP 563), and a bare None here would read
+                    # as "no annotation".
+                    if return_annotation is None or return_annotation == "None":
+                        return_annotation = type(None)
                 if return_annotation is not inspect.Signature.empty:
                     return_type = return_annotation
 

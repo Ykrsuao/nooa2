@@ -36,6 +36,7 @@ from nooa.strategies.base import (
     build_sampling_kwargs,
 )
 from nooa.strategies.template import TemplateStrategy
+from nooa.strategy_validation import run_postconditions, run_preconditions
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import PredictConfig
@@ -213,6 +214,9 @@ class PredictStrategy(GenerationStrategy):
                 f"PREDICT strategy requires a return type (Pydantic model or basic type)."
             )
 
+        # Method-local preconditions fail fast, before any LLM call.
+        await run_preconditions(runtime.agent, call, self.config.preconditions)
+
         # Convert return type to Pydantic model (wraps basic types if needed)
         response_model = self._create_response_model(return_type, call.method_name)
 
@@ -285,6 +289,13 @@ class PredictStrategy(GenerationStrategy):
                 # Step 4: Validate the parsed response (this may throw PydanticValidationError)
                 validated_data = self._validate_response(
                     parsed_response, response_model, return_type
+                )
+
+                # Step 5: Method-local postconditions. An InvariantError is a
+                # ValueError, so it takes the validation-retry path below; any
+                # other postcondition failure surfaces as a RuntimeError.
+                await run_postconditions(
+                    runtime.agent, validated_data, call, self.config.postconditions
                 )
 
                 logger.debug(f"[PREDICT attempt={attempt}] Validation successful")

@@ -20,7 +20,7 @@ import ast
 import inspect
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Any
 
 from pydantic import ValidationError as PydanticValidationError
 
@@ -802,24 +802,10 @@ class PurePythonStrategy(CompositeStrategy):
         if result.has_return:
             return True
 
-        method = getattr(runtime.agent, call.method_name, None)
-        if not method:
-            return False
-
-        try:
-            hints = get_type_hints(method, include_extras=True)
-            return_type = hints.get("return", inspect.Parameter.empty)
-        except (NameError, TypeError, AttributeError):
-            try:
-                sig = inspect.signature(method)
-                return_type = sig.return_annotation
-            except (ValueError, TypeError):
-                return False
-
-        if return_type in (inspect.Signature.empty, type(None), None):
-            return True
-
-        return False
+        # A cell without `return` completes only a method that returns nothing.
+        # Use the type of the method actually being called (resolved on the
+        # call), not whatever the instance attribute of that name declares.
+        return call.return_type in (type(None), None)
 
     async def _finalize_success(
         self, runtime: RuntimeServices, result: Any, call: "CurrentCall", session: GenerationSession
@@ -839,7 +825,7 @@ class PurePythonStrategy(CompositeStrategy):
         try:
             return_validator = ReturnValueValidator()
             validated_result = return_validator.validate(
-                result_to_validate, runtime, call.method_name
+                result_to_validate, runtime, call.method_name, return_type=call.return_type
             )
             logger.info("[PURE_PYTHON] Method executed successfully")
             return (True, validated_result)

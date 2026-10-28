@@ -3,11 +3,12 @@
 """Strategy-level method conditions.
 
 Preconditions and postconditions are small invariant hooks that run around
-generated strategy methods. They are intended for checks that Pydantic
-return-type validation cannot express, such as live agent state or per-call
-process invariants.
+generated strategy methods; each may be a plain or an ``async`` callable. They
+are intended for checks that Pydantic return-type validation cannot express,
+such as live agent state or per-call process invariants.
 """
 
+import inspect
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -43,24 +44,34 @@ def normalize_conditions(
     return tuple(normalized)
 
 
-def _run_condition(kind: str, func: Callable[..., Any], *args: Any) -> None:
+def _condition_name(func: Callable[..., Any]) -> str:
+    return getattr(func, "__name__", type(func).__name__)
+
+
+async def _run_condition(kind: str, func: Callable[..., Any], *args: Any) -> None:
     try:
-        func(*args)
+        outcome = func(*args)
+        # Conditions may be sync or async; an un-awaited coroutine would let
+        # the check pass without ever running it.
+        if inspect.isawaitable(outcome):
+            await outcome
     except InvariantError:
         raise
     except Exception as e:
-        raise RuntimeError(f"method {kind} {func.__name__!r} failed") from e
+        raise RuntimeError(f"method {kind} {_condition_name(func)!r} failed") from e
 
 
-def run_preconditions(agent: Any, call: Any, preconditions: Iterable[Any]) -> None:
+async def run_preconditions(agent: Any, call: Any, preconditions: Iterable[Any]) -> None:
     """Run pre-call conditions for ``call``."""
 
     for precondition in normalize_conditions("preconditions", preconditions):
-        _run_condition("precondition", precondition, agent, call)
+        await _run_condition("precondition", precondition, agent, call)
 
 
-def run_postconditions(agent: Any, result: Any, call: Any, postconditions: Iterable[Any]) -> None:
+async def run_postconditions(
+    agent: Any, result: Any, call: Any, postconditions: Iterable[Any]
+) -> None:
     """Run post-result conditions for ``result``."""
 
     for postcondition in normalize_conditions("postconditions", postconditions):
-        _run_condition("postcondition", postcondition, agent, result, call)
+        await _run_condition("postcondition", postcondition, agent, result, call)

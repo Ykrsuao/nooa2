@@ -3067,23 +3067,19 @@ class TestPurePythonExecutionError:
 # ---------------------------------------------------------------------------
 
 
-class TestPurePythonIsTaskCompleteException:
-    """Tests for _is_task_complete with get_type_hints exception."""
+class TestPurePythonIsTaskCompleteWithoutReturn:
+    """A cell without ``return`` completes only a method that returns nothing.
 
-    def test_get_type_hints_exception_falls_back_to_signature(self):
-        """When get_type_hints raises, falls back to inspect.signature (lines 754-759)."""
+    The rule reads the call's own resolved return type, not the agent attribute
+    of the same name, so no annotation lookup can fail here.
+    """
 
-        class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(PurePythonStrategy())
-            async def compute(self) -> None:
-                """Compute."""
-                ...
-
-        strat = PurePythonStrategy()
-        agent = TestAgent(llm=_TEST_LLM)
-        rt = MagicMock()
-        rt.agent = agent
-
+    @pytest.mark.parametrize(
+        ("return_type", "expected"),
+        [(type(None), True), (None, True), (int, False), (str, False)],
+        ids=["NoneType", "no-annotation", "int", "str"],
+    )
+    def test_completion_follows_the_calls_return_type(self, return_type, expected):
         from nooa.events import ExecutionResult
         from nooa.strategies.current_call import CurrentCall
 
@@ -3091,60 +3087,15 @@ class TestPurePythonIsTaskCompleteException:
             id="c1",
             method_name="compute",
             decorator="strategy",
-            signature="(self) -> None",
+            signature="(self)",
             docstring="Compute.",
             args=(),
             kwargs={},
+            return_type=return_type,
         )
         result = ExecutionResult(stdout="", error=None, defined_methods={}, has_return=False)
-
-        with patch(
-            "nooa.strategies.pure_python.get_type_hints",
-            side_effect=NameError("unknown"),
-        ):
-            is_complete = strat._is_task_complete(result, rt, call)
-
-        assert isinstance(is_complete, bool)
-
-    def test_get_signature_raises_returns_false(self):
-        """When inspect.signature raises, returns False (lines 758-759)."""
-
-        class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(PurePythonStrategy())
-            async def compute(self) -> None:
-                """Compute."""
-                ...
-
-        strat = PurePythonStrategy()
-        agent = TestAgent(llm=_TEST_LLM)
-        rt = MagicMock()
-        rt.agent = agent
-
-        from nooa.events import ExecutionResult
-        from nooa.strategies.current_call import CurrentCall
-
-        call = CurrentCall(
-            id="c1",
-            method_name="compute",
-            decorator="strategy",
-            signature="(self) -> None",
-            docstring="Compute.",
-            args=(),
-            kwargs={},
-        )
-        result = ExecutionResult(stdout="", error=None, defined_methods={}, has_return=False)
-
-        with patch(
-            "nooa.strategies.pure_python.get_type_hints",
-            side_effect=NameError("unknown"),
-        ):
-            with patch(
-                "nooa.strategies.pure_python.inspect.signature",
-                side_effect=ValueError("no signature"),
-            ):
-                is_complete = strat._is_task_complete(result, rt, call)
-
-        assert is_complete is False
+        rt = MagicMock()  # never consulted: the agent attribute is irrelevant
+        assert PurePythonStrategy()._is_task_complete(result, rt, call) is expected
 
 
 # ---------------------------------------------------------------------------

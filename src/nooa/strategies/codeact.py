@@ -936,7 +936,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             call.task_tag = runtime.event_manager.add(Task(prompt=task_content))
             # Method-local preconditions run before generation and fail fast
             # (raise to abort the call); see nooa.strategy_validation.
-            run_preconditions(runtime.agent, call, self.config.preconditions)
+            await run_preconditions(runtime.agent, call, self.config.preconditions)
 
         logger.info(
             f"[CODEACT] Starting session for {call.method_name}: "
@@ -1135,7 +1135,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         # telemetry or passed to its string-only API.
                         result_preview = action.value if isinstance(action.value, str) else None
                         get_harness_metrics().stop_to_return_result(result_preview)
-                        validated, validation_error = self._handle_return_result(
+                        validated, validation_error = await self._handle_return_result(
                             runtime,
                             {"result": action.value},
                             return_type,
@@ -1656,7 +1656,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         elif tool_call.name == "return_result" and self._supports_return_result():
             # Return the final result
             try:
-                validated, error_msg = self._handle_return_result(
+                validated, error_msg = await self._handle_return_result(
                     runtime, args, return_type, session, call
                 )
             except GenerationError:
@@ -1931,7 +1931,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             # Validate the return_result (called inline within execute_python, not as separate tool)
             try:
-                validated, validation_error = self._handle_return_result(
+                validated, validation_error = await self._handle_return_result(
                     runtime,
                     result.signal.result,  # Extract the result dict from the signal
                     return_type,
@@ -2015,32 +2015,56 @@ Standard Python builtins and agent instance (`self`) are available."""
                     return_type,
                     method_name,
                 )
-                if success:
-                    # Add execution output event
+            except Exception as e:
+                success, validated = False, None
+                logger.debug(f"[CODEACT] Auto-completion validation error: {e}, continuing loop")
+            if success:
+                # A type-valid explicit return is a completion attempt, so it is
+                # held to the same postconditions as return_result. A type
+                # mismatch above stays silent: `return x` need not mean "done".
+                invariant_error = await self._check_explicit_return_postconditions(
+                    runtime, validated, return_type, session, call, tool_call, tool_call_event_id
+                )
+                if invariant_error is not None:
                     runtime.event_manager.add(
                         PythonOutput(
                             tool_call_id=tool_call.id,
                             execution_count=execution_count,
                             stdout=result.stdout,
-                            stderr=result.stderr,
-                            value=result.returned_value,
+                            stderr=(
+                                f"{result.stderr}\nreturn validation error: {invariant_error}"
+                                if result.stderr
+                                else f"return validation error: {invariant_error}"
+                            ),
                             explicit_return=result.explicit_return,
-                            execution_status=ResultStatus.COMPLETE,
+                            execution_status=ResultStatus.ERROR,
                             images=result.images,
                         )
                     )
-                    get_harness_metrics().explicit_return_completed()
-                    # Record a trace-only completion marker. Both CodeAct variants
-                    # omit this marker from provider replay: it was not an LLM call.
-                    self._emit_synthetic_inline_return(runtime, validated)
-                    logger.info("[CODEACT] Auto-completed task from explicit return statement")
-                    return ("TASK_COMPLETE", validated)
-                # Validation failed - continue with normal flow
-                logger.debug(
-                    "[CODEACT] Auto-completion validation failed (type mismatch), continuing loop"
+                    return None
+                # Add execution output event
+                runtime.event_manager.add(
+                    PythonOutput(
+                        tool_call_id=tool_call.id,
+                        execution_count=execution_count,
+                        stdout=result.stdout,
+                        stderr=result.stderr,
+                        value=result.returned_value,
+                        explicit_return=result.explicit_return,
+                        execution_status=ResultStatus.COMPLETE,
+                        images=result.images,
+                    )
                 )
-            except Exception as e:
-                logger.debug(f"[CODEACT] Auto-completion validation error: {e}, continuing loop")
+                get_harness_metrics().explicit_return_completed()
+                # Record a trace-only completion marker. Both CodeAct variants
+                # omit this marker from provider replay: it was not an LLM call.
+                self._emit_synthetic_inline_return(runtime, validated)
+                logger.info("[CODEACT] Auto-completed task from explicit return statement")
+                return ("TASK_COMPLETE", validated)
+            # Validation failed - continue with normal flow
+            logger.debug(
+                "[CODEACT] Auto-completion validation failed (type mismatch), continuing loop"
+            )
 
         # Note: Bare expressions (IPython-style) are shown as "Out[n]:" but do NOT auto-complete.
         # Only explicit `return x` statements can auto-complete the task.
@@ -2119,7 +2143,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
-    def _handle_return_result(
+    async def _handle_return_result(
         self,
         runtime: RuntimeServices,
         args: dict[str, Any],
@@ -2173,7 +2197,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         f"Call return_result() with no arguments."
                     )
                     return (None, error_msg)
-                run_postconditions(runtime.agent, None, call, self.config.postconditions)
+                await run_postconditions(runtime.agent, None, call, self.config.postconditions)
                 return (None, None)  # Success - return None
 
             # Normalize args to always have "result" key
@@ -2264,7 +2288,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             # express (e.g. live agent state). An ``InvariantError`` is caught by
             # the handler below and routed as model-correctable retry feedback;
             # any other exception surfaces as an infrastructure error.
-            run_postconditions(runtime.agent, validated, call, self.config.postconditions)
+            await run_postconditions(runtime.agent, validated, call, self.config.postconditions)
 
             return (validated, None)
 
@@ -2647,6 +2671,47 @@ Standard Python builtins and agent instance (`self`) are available."""
                 stripped[:80],
             )
             return value
+
+    async def _check_explicit_return_postconditions(
+        self,
+        runtime: RuntimeServices,
+        validated: Any,
+        return_type: Any,
+        session: CodeActSession,
+        call: Any,
+        tool_call: Any,
+        tool_call_event_id: str,
+    ) -> str | None:
+        """Run postconditions on a type-valid explicit ``return`` value.
+
+        Returns ``None`` when every postcondition holds, otherwise the feedback
+        for the model. An ``InvariantError`` counts against the retry budget
+        exactly like a rejected ``return_result``; any other exception from a
+        postcondition propagates as an infrastructure error.
+        """
+        try:
+            await run_postconditions(runtime.agent, validated, call, self.config.postconditions)
+        except InvariantError as e:
+            get_harness_metrics().validation_error(type(e).__name__, str(e)[:500])
+            session.record_error()
+            error_msg = format_validation_error(
+                e, return_type, validated, runtime.truncation_config
+            )
+            runtime.event_manager.update(
+                tool_call_event_id,
+                result=ToolResult(
+                    tool_call_id=tool_call.id,
+                    content="status: error",
+                    result_status=ResultStatus.ERROR,
+                ),
+            )
+            if session.is_exhausted():
+                raise GenerationError(
+                    f"return validation failed after {session.max_retries} attempts.\n"
+                    f"Last error:\n{error_msg}"
+                ) from e
+            return error_msg
+        return None
 
     def _try_validate_return_value(
         self,

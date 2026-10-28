@@ -174,9 +174,10 @@ class PredictConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    # Method-local deterministic validators (see nooa.strategy_validation);
-    # currently consumed by the CodeAct strategy (Predict wiring lands with the
-    # full validator MR, !444).
+    # Method-local deterministic validators (see nooa.strategy_validation).
+    # ``preconditions`` run before the LLM call (fail-fast); ``postconditions``
+    # run after response validation and raise ``InvariantError`` for a
+    # model-correctable retry.
     preconditions: Sequence[MethodPrecondition] = ()
     postconditions: Sequence[MethodPostcondition] = ()
 

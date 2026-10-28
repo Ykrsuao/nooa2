@@ -204,3 +204,30 @@ async def test_pure_python_validation_optional_type():
     agent_instance2 = TestAgent2()
     result2 = await agent_instance2.maybe_name()
     assert result2 == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_pure_python_validates_against_the_called_methods_type():
+    """A subclass override with a different return type must not change how the
+    base generation method's result is validated.
+
+    Regression: the validator looked the type up as ``getattr(agent, name)``,
+    found the subclass's ``-> str`` and stringified the base's ``Profile``.
+    """
+
+    class Base(Agent, llm=FakeLLMClient()):
+        @strategy(PurePythonStrategy())
+        async def get_user(self) -> UserProfile:
+            """Return user profile."""
+            ...
+
+    class Child(Base):
+        async def get_user(self) -> str:  # type: ignore[override]
+            profile = await super().get_user()
+            assert isinstance(profile, UserProfile), type(profile)
+            return profile.username
+
+    llm = FakeLLMClient.with_code_responses(
+        ['return {"username": "alice", "email": "alice@example.com", "age": 30}']
+    )
+    assert await Child(llm=llm).get_user() == "alice"

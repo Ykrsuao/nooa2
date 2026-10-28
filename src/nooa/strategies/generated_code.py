@@ -356,20 +356,17 @@ class ReturnValueValidator:
     # Basic types that can be validated directly
     _BASIC_TYPES = (str, int, float, bool, list, dict, tuple, set, bytes)
 
-    def validate(self, value: Any, runtime: Any, method_name: str) -> Any:
-        method = getattr(runtime.agent, method_name, None)
-        if not method:
-            return value
+    # Sentinel: no return type supplied, so look it up on the agent by name.
+    _LOOKUP = object()
 
-        try:
-            hints = get_type_hints(method, include_extras=True)
-            return_type = hints.get("return", inspect.Parameter.empty)
-        except (NameError, TypeError, AttributeError):
-            try:
-                sig = inspect.signature(method)
-                return_type = sig.return_annotation
-            except (ValueError, TypeError):
-                return value
+    def validate(
+        self, value: Any, runtime: Any, method_name: str, *, return_type: Any = _LOOKUP
+    ) -> Any:
+        if return_type is ReturnValueValidator._LOOKUP:
+            return_type = self._lookup_return_type(runtime, method_name)
+        elif return_type is None:
+            # A resolved call reports "no annotation" as None.
+            return_type = inspect.Signature.empty
 
         if return_type == inspect.Signature.empty:
             return value
@@ -403,6 +400,20 @@ class ReturnValueValidator:
             )
 
         return value
+
+    @staticmethod
+    def _lookup_return_type(runtime: Any, method_name: str) -> Any:
+        method = getattr(runtime.agent, method_name, None)
+        if not method:
+            return inspect.Signature.empty
+        try:
+            hints = get_type_hints(method, include_extras=True)
+            return hints.get("return", inspect.Signature.empty)
+        except (NameError, TypeError, AttributeError):
+            try:
+                return inspect.signature(method).return_annotation
+            except (ValueError, TypeError):
+                return inspect.Signature.empty
 
     def _get_origin(self, return_type: Any) -> Any:
         """Get the origin type of a generic alias (e.g., list from list[str])."""
